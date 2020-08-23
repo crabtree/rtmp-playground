@@ -7,9 +7,11 @@ async function main () {
     const c = new RTMPClient();
     try {
         await c.connect(PORT, HOST);
-        
+
         await c.handshake();
-        
+
+        await c.command("connect");
+       
         await c.disconnect();
     } catch(ex) {
         console.error(ex);
