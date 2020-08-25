@@ -6,11 +6,11 @@ const HOST = "127.0.0.1"
 async function main () {
     const c = new RTMPClient();
     try {
-        await c.connect(PORT, HOST);
+        await c.open(PORT, HOST);
 
         await c.handshake();
 
-        await c.command("connect");
+        await c.connect("stream");
        
         await c.disconnect();
     } catch(ex) {

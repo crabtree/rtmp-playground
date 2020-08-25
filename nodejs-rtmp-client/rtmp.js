@@ -1,11 +1,23 @@
 const net = require("net");
 const events = require("events");
 
-const HandshakeStage = {  S0: 0, S1: 1,  S2: 2 };
+const HandshakeStage = { S0: 0, S1: 1,  S2: 2 };
 
-const AMF0Type = { Number: 0x00, Boolean: 0x01, String: 0x02, Object: 0x03 };
-const AMF0MessageType = { Command: 0x14 };
-const AMF3MessageType = { Command: 0x11 };
+const AMF0Type = { 
+    Number:  0x00, 0x00: "Number",
+    Boolean: 0x01, 0x01: "Boolean",
+    String:  0x02, 0x02: "String",
+    Object:  0x03, 0x03: "Object",
+    NULL:    0x05, 0x05: "NULL",
+};
+const AMF0MessageType = { 
+    UserControl:   0x04, 0x04: "UserControl",
+    WindowAckSize: 0x05, 0x05: "WindowAckSize",
+    SetPeerBandw:  0x06, 0x06: "SetPeerBandw",
+    AudioData:     0x08, 0x08: "AudioData",
+    VideoData:     0x09, 0x09: "VideoData",
+    Command:       0x14, 0x14: "Command",
+};
 const AudioCodecs = {
     SUPPORT_SND_NONE:    0x0001,
     SUPPORT_SND_ADPCM:   0x0002,
@@ -33,8 +45,8 @@ const VideoCodecs = {
 const VideoFuntion = {
     SUPPORT_VID_CLIENT_SEEK: 0x01,
 };
-
-const EOM = [0x00, 0x00, 0x09];
+const NetConnStreamID = [ 0x00, 0x00, 0x00, 0x00 ];
+const EOM = [ 0x00, 0x00, 0x09 ]; // end of object marker
 
 class RTMPClient extends events.EventEmitter {
     constructor() {
@@ -42,7 +54,7 @@ class RTMPClient extends events.EventEmitter {
         this.s = new net.Socket();
     }
 
-    connect(port, host) {
+    open(port, host) {
         return new Promise((resolve, reject) => {
             this.s.on("error", (err) => { 
                 this.s.removeAllListeners();
@@ -132,59 +144,64 @@ class RTMPClient extends events.EventEmitter {
         });
     }
 
-    command(cmd) {
-        return new Promise((resolve) => {
-            const cmdObj = [
-                ...toCommandName(cmd),
-                ...toTransactionID(1),
-                AMF0Type.Object,
-                ...toStringProperty("app", "stream"),
-                ...toStringProperty("flashVer", "LNX 10,0,32,18"),
-                ...toStringProperty("tcUrl", "rtmp://localhost:1935/stream"),
-                ...toBooleanProperty("fpad", false),
-                ...toNumberProperty("capabilities", 15),
-                ...toNumberProperty("audioCodecs", 
-                    AudioCodecs.SUPPORT_SND_NONE
-                    | AudioCodecs.SUPPORT_SND_ADPCM
-                    | AudioCodecs.SUPPORT_SND_MP3
-                    | AudioCodecs.SUPPORT_SND_UNUSED
-                    | AudioCodecs.SUPPORT_SND_NELLY8
-                    | AudioCodecs.SUPPORT_SND_NELLY
-                    | AudioCodecs.SUPPORT_SND_AAC
-                    | AudioCodecs.SUPPORT_SND_SPEEX),
-                ...toNumberProperty("videoCodecs", 
-                    VideoCodecs.SUPPORT_VID_SORENSON
-                    | VideoCodecs.SUPPORT_VID_HOMEBREW
-                    | VideoCodecs.SUPPORT_VID_VP6
-                    | VideoCodecs.SUPPORT_VID_VP6ALPHA
-                    | VideoCodecs.SUPPORT_VID_HOMEBREWV
-                    | VideoCodecs.SUPPORT_VID_H264),
-                ...toNumberProperty("videoFunction", 
-                    VideoFuntion.SUPPORT_VID_CLIENT_SEEK),
-                ...EOM,
-            ];
-            
+    connect(app) {
+        const cmdName = "connect";
+        const transactionID = 1;
+        const obj = new AMF0Object([
+            new AMF0Property("app", new AMF0String(app)),
+            new AMF0Property("flashVer", new AMF0String("LNX 10,0,32,18")),
+            new AMF0Property("tcUrl", new AMF0String("rtmp://localhost:1935/stream")),
+            new AMF0Property("fpad", new AMF0Boolean(false)),
+            new AMF0Property("capabilities", new AMF0Number(15)),
+            new AMF0Property("audioCodecs", new AMF0Number(
+                AudioCodecs.SUPPORT_SND_NONE
+                | AudioCodecs.SUPPORT_SND_ADPCM
+                | AudioCodecs.SUPPORT_SND_MP3
+                | AudioCodecs.SUPPORT_SND_UNUSED
+                | AudioCodecs.SUPPORT_SND_NELLY8
+                | AudioCodecs.SUPPORT_SND_NELLY
+                | AudioCodecs.SUPPORT_SND_AAC
+                | AudioCodecs.SUPPORT_SND_SPEEX)),
+            new AMF0Property("videoCodecs", new AMF0Number(
+                VideoCodecs.SUPPORT_VID_SORENSON
+                | VideoCodecs.SUPPORT_VID_HOMEBREW
+                | VideoCodecs.SUPPORT_VID_VP6
+                | VideoCodecs.SUPPORT_VID_VP6ALPHA
+                | VideoCodecs.SUPPORT_VID_HOMEBREWV
+                | VideoCodecs.SUPPORT_VID_H264)),
+            new AMF0Property("videoFunction", new AMF0Number(
+                VideoFuntion.SUPPORT_VID_CLIENT_SEEK)),
+        ]);
+        const cmd = new AMF0Command(cmdName, transactionID, [obj]);
+
+        return this._command(cmd);
+    }
+
+    _command(cmd) {
+        const cmdBytes = cmd.toBytes();
+        return new Promise((resolve, reject) => {
             const msg = [
-                0x3, // format and chunk stream ID
-                0x0, 0x0, 0x0, // timestamp
-                ...toBytes(3, cmdObj.length),
+                0x03, // format and chunk stream ID
+                0x00, 0x00, 0x00, // timestamp
+                ...toBytes(3, cmdBytes.length),
                 AMF0MessageType.Command,
-                ...toBytes(4, 0), // stream ID
-                ...cmdObj,
+                ...NetConnStreamID,
+                ...cmdBytes,
             ];
-            
+
             for (var i = 140; i < msg.length; i += 140) {
                 msg.splice(i, 0, 0xc3);
             }
-            
+
             this.s.write(new Uint8Array(msg), (err) => {
                 if(err) {
                     console.error(err);
+                    reject();
                 }
                 
                 resolve();
             });
-        }); 
+        });
     }
 } 
 
@@ -198,69 +215,6 @@ function recv(client) {
         // determine fmt
         // (byte & 192) >> 6 => 0,1,2,3
     }
-}
-
-function toTransactionID(id) {
-    return [
-        AMF0Type.Number,
-        ...toNumber(id)
-    ];
-}
-
-function toNumber(number) {
-    const b = Buffer.alloc(8)
-    b.writeDoubleBE(number)
-    return b
-}
-
-function toCommandName(cmd) {
-    return [
-        AMF0Type.String,
-        ...toBytes(2, cmd.length),
-        ...Buffer.from(cmd),
-    ];
-}
-
-function toNumberProperty(name, value) {
-    return [
-        ...toBytes(2, name.length),
-        ...Buffer.from(name),
-        AMF0Type.Number,
-        ...toNumber(value)
-    ];
-}
-
-function toBooleanProperty(name, value) {
-    return [
-        ...toBytes(2, name.length),
-        ...Buffer.from(name),
-        AMF0Type.Boolean,
-        (value) ? 1 : 0
-    ];
-}
-
-function toStringProperty(name, value) {
-    return [
-        ...toBytes(2, name.length),
-        ...Buffer.from(name),
-        AMF0Type.String,
-        ...toBytes(2, value.length),
-        ...Buffer.from(value)
-    ];
-}
-
-function toBytes(bytes, data) {
-    const b = Buffer.alloc(bytes);
-    let prevMax = 0;
-    for(var i = 0; i < bytes; i++) {
-        const shift = i*8;
-        const max = Math.pow(2, (i+1)*8)-1;
-        const mask = max - prevMax;
-        const idx = bytes - i - 1;
-        b[idx] = (data & mask) >> shift;
-        prevMax = max;
-    }
-    return b;
 }
 
 class C0S0 {
@@ -282,6 +236,160 @@ class C2S2 {
         this.time2 = t2;
         this.random = r;
     }
+}
+
+class AMF0BaseType {
+    constructor(type) {
+        this.type = type;
+    }
+
+    toBytes() {
+        return [
+            this.type,
+        ];
+    }
+}
+
+class AMF0Number extends AMF0BaseType {
+    constructor(value) {
+        super(AMF0Type.Number);
+        this.value = value;
+    }
+
+    toBytes() {
+        return [
+            ...super.toBytes(),
+            ...toNumber(this.value),
+        ];
+    }
+}
+
+class AMF0Boolean extends AMF0BaseType {
+    constructor(value) {
+        super(AMF0Type.Boolean);
+        this.value = value;
+    }
+
+    toBytes() {
+        return [
+            ...super.toBytes(),
+            (this.value) ? 0x01 : 0x00,
+        ];
+    }
+}
+
+class AMF0String extends AMF0BaseType {
+    constructor(value) {
+        super(AMF0Type.String);
+        this.value = value;
+    }
+
+    toBytes() {
+        return [
+            ...super.toBytes(),
+            ...toString(this.value),
+        ];
+    }
+}
+
+class AMF0Property {
+    constructor(name, value) {
+        this.name = name;
+        this.value = value;
+    }
+
+    toBytes() {
+        return [
+            ...toString(this.name),
+            ...this.value.toBytes(),
+        ];
+    }
+}
+
+class AMF0Command {
+    constructor(name, transactionID, objects) {
+        this.name = name;
+        this.transactionID = transactionID;
+        this.objects = objects || [];
+    }
+
+    toBytes() {
+        return [
+            ...toCommandName(this.name),
+            ...toTransactionID(this.transactionID),
+            ...this.objects.reduce(
+                (p, c) => { p.push(...c.toBytes()); return p; }, []),
+        ];
+    }
+}
+
+class AMF0Object {
+    constructor(properties) {
+        this.type = AMF0Type.Object;
+        this.properties = properties || [];
+    }
+
+    addPoperty(property) {
+        this.properties.push(property);
+    }
+
+    toBytes() {
+        return [
+            this.type,
+            ...this.properties.reduce(
+                (p, c) => { p.push(...c.toBytes()); return p; }, []),
+            ...EOM,
+        ];
+    }
+}
+
+class AMF0ObjectNull {
+    constructor() {}
+    
+    toBytes() {
+        return [AMF0Type.NULL];
+    }
+}
+
+function toTransactionID(id) {
+    return [
+        AMF0Type.Number,
+        ...toNumber(id)
+    ];
+}
+
+function toNumber(number) {
+    const b = Buffer.alloc(8)
+    b.writeDoubleBE(number)
+    return b
+}
+
+function toString(value) {
+    return [
+        ...toBytes(2, value.length),
+        ...Buffer.from(value),
+    ];
+}
+
+function toCommandName(cmd) {
+    return [
+        AMF0Type.String,
+        ...toString(cmd),
+    ];
+}
+
+function toBytes(bytes, data) {
+    const b = Buffer.alloc(bytes);
+    let prevMax = 0;
+    for(var i = 0; i < bytes; i++) {
+        const shift = i*8;
+        const max = Math.pow(2, (i+1)*8)-1;
+        const mask = max - prevMax;
+        const idx = bytes - i - 1;
+        b[idx] = (data & mask) >> shift;
+        prevMax = max;
+    }
+    return b;
 }
 
 module.exports = RTMPClient;
