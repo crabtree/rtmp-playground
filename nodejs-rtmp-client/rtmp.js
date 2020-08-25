@@ -187,6 +187,20 @@ class RTMPClient extends events.EventEmitter {
         return this._command(cmd);
     }
 
+    play(name) {
+        const cmdName = "play";
+        const transactionID = 4;
+        const obj = new AMF0ObjectNull();
+        const streamName = new AMF0String(name);
+        const start = new AMF0Number(-1000);
+        // TODO: handle duration and reset properties?
+
+        const cmd = new AMF0Command(
+            cmdName, transactionID, [obj, streamName, start]);
+        
+        return this._command(cmd);
+    }
+
     _command(cmd) {
         const cmdBytes = cmd.toBytes();
         return new Promise((resolve, reject) => {

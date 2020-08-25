@@ -13,6 +13,8 @@ async function main () {
         await c.connect("stream");
 
         await c.createStream();
+
+        await c.play("example");
        
         await c.disconnect();
     } catch(ex) {
