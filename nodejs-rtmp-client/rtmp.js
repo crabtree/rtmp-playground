@@ -177,6 +177,16 @@ class RTMPClient extends events.EventEmitter {
         return this._command(cmd);
     }
 
+    createStream() {
+        const cmdName = "createStream";
+        const transactionID = 2;
+        const obj = new AMF0ObjectNull();
+        const cmd = new AMF0Command(
+            cmdName, transactionID, [obj]);
+
+        return this._command(cmd);
+    }
+
     _command(cmd) {
         const cmdBytes = cmd.toBytes();
         return new Promise((resolve, reject) => {

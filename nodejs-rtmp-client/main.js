@@ -11,6 +11,8 @@ async function main () {
         await c.handshake();
 
         await c.connect("stream");
+
+        await c.createStream();
        
         await c.disconnect();
     } catch(ex) {
