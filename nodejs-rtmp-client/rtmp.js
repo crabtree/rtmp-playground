@@ -1,5 +1,6 @@
 const net = require("net");
 const events = require("events");
+const { parse } = require("querystring");
 
 const HandshakeStage = { S0: 0, S1: 1,  S2: 2 };
 
@@ -11,12 +12,40 @@ const AMF0Type = {
     NULL:    0x05, 0x05: "NULL",
 };
 const AMF0MessageType = { 
+    SetChunkSize:  0x01, 0x01: "SetChunkSize",
+    AbortMsg:      0x02, 0x02: "AbortMsg",
+    Ack:           0x03, 0x03: "Ack",
     UserControl:   0x04, 0x04: "UserControl",
     WindowAckSize: 0x05, 0x05: "WindowAckSize",
     SetPeerBandw:  0x06, 0x06: "SetPeerBandw",
     AudioData:     0x08, 0x08: "AudioData",
     VideoData:     0x09, 0x09: "VideoData",
+    DataMsg:       0x12, 0x12: "DataMsg",
+    SharedObjMsg:  0x13, 0x13: "SharedObjMsg",
     Command:       0x14, 0x14: "Command",
+    AggregateMsg:  0x16, 0x16: "AggregateMsg",
+};
+const AMF0SharedObjMsgEvent = {
+    Use:           0x01, 0x01: "Use",
+    Release:       0x02, 0x02: "Release",
+    RequestChange: 0x03, 0x03: "RequestChange",
+    Change:        0x04, 0x04: "Change",
+    Success:       0x05, 0x05: "Success",
+    SendMessage:   0x06, 0x06: "SendMessage",
+    Status:        0x07, 0x07: "Status",
+    Clear:         0x08, 0x08: "Clear",
+    Remove:        0x09, 0x09: "Remove",
+    RequestRemove: 0x10, 0x10: "RequestRemove",
+    UseSuccess:    0x11, 0x11: "UseSuccess",
+};
+const AMF0UserControlMsgEvent = {
+    StreamBegin:     0x00, 0x00: "StreamBegin",
+    StreamEOF:       0x01, 0x01: "StreamEOF",
+    StreamDry:       0x02, 0x02: "StreamDry",
+    StreamBufferLen: 0x03, 0x03: "StreamBufferLen",
+    StreamIsRec:     0x04, 0x04: "StreamIsRec",
+    PingReq:         0x05, 0x05: "PingReq",
+    PingResp:        0x06, 0x06: "PingResp",
 };
 const AudioCodecs = {
     SUPPORT_SND_NONE:    0x0001,
@@ -74,12 +103,12 @@ class RTMPClient extends events.EventEmitter {
 
     disconnect() {
         return new Promise((resolve) => {
-            this.s.on("close", () => {
-                console.log(`Connection closed.`);
-                resolve();
-            });
+            // this.s.on("close", () => {
+            //     console.log(`Connection closed.`);
+            //     resolve();
+            // });
 
-            this.s.destroy();
+            // this.s.destroy();
         });
     }
 
@@ -229,18 +258,6 @@ class RTMPClient extends events.EventEmitter {
     }
 } 
 
-function recv(client) {
-    let buf = Buffer.alloc(0);
-
-    return function(data) {
-        console.log(data);
-        buf = Buffer.concat([buf, data]);
-        
-        // determine fmt
-        // (byte & 192) >> 6 => 0,1,2,3
-    }
-}
-
 class C0S0 {
     constructor(v) {
         this.version = v;
@@ -380,6 +397,13 @@ function toTransactionID(id) {
     ];
 }
 
+function readTransactionID(data, offset) {
+    const type = data[offset]; // should be AMF0Type.Number;
+    const id = data.readDoubleBE(offset+1);
+
+    return { offset: offset+1+8, id };
+}
+
 function toNumber(number) {
     const b = Buffer.alloc(8)
     b.writeDoubleBE(number)
@@ -398,6 +422,14 @@ function toCommandName(cmd) {
         AMF0Type.String,
         ...toString(cmd),
     ];
+}
+
+function readCommandName(data, offset) {
+    const type = data[offset]; // should be AMF0Type.String
+    const len = data.readUInt16BE(offset+1);
+    const name = data.toString('utf8', offset+3, offset+3+len);
+    
+    return { offset: offset+3+len, name };
 }
 
 function toBytes(bytes, data) {
@@ -445,8 +477,153 @@ function propertyFromBytes(bytes, offset) {
             offset += 1;
             break;
     }
-    const prop = AMF0Property(name, obj);
+    const prop = new AMF0Property(name, obj);
     return { offset, name, type, value, prop };
+}
+
+const ParserStage = {
+    Start: 0, 
+    FMT: 1, 
+    StreamID: 2, 
+    MsgHeader: 3,
+    Emit: 999
+};
+class Parser {
+    constructor(client) {
+        this.client = client;
+        this.cache = [];
+        this.stage = ParserStage.Start
+        this.offset = 0;
+        this.chunk = {};
+    }
+
+    parse(data) {
+        while(this.offset < data.length) {
+            if(this.stage === ParserStage.Start) {
+                // determine fmt
+                // (byte & 192) >> 6 => 0,1,2,3
+                this.chunk = {};
+                this.chunk.fmt = (data[this.offset] & 192) >> 6;
+                this.stage = ParserStage.FMT;
+            }
+            
+            if(this.stage === ParserStage.FMT) {
+                // determine stream ID
+                // (byte & 63)
+                const firstByte = (data[this.offset] & 63)
+                if(firstByte === 0) { //- if stream ID == 0 read next byte for ID and add 64
+                    this.chunk.streamID = data[this.offset+1] + 64;
+                    this.offset += 2;
+                } else if(firstByte === 1) { //- if stream ID == 1 read next two bytes for ID (third*256+second+64)
+                    this.chunk.streamID = data[this.offset+2] * 256 + data[this.offset+1] + 64;
+                    this.offset += 3;
+                } else {
+                    //- if stream ID == 2 low level control msg
+                    //- if stream ID >= 2, the ID is stored in this one byte (0-5 bits)
+                    this.chunk.streamID = firstByte;
+                    this.offset += 1;
+                }
+                this.stage = ParserStage.StreamID;
+            }
+
+            if(this.stage === ParserStage.StreamID) {
+                if (this.chunk.fmt === 0) {
+                    //- fmt == 0 - headers 11 bytes long
+                    //-- timestamp - 3 bytes, if 0xFFFFFF there should be extended timestamp field present
+                    //-- msg len - 3 bytes
+                    //-- msg type id - 1 byte
+                    //-- msg stream id - 4 bytes
+                    this.chunk.timestamp = data.readUIntBE(this.offset, 3);
+                    this.chunk.len = data.readUIntBE(this.offset+3, 3);
+                    this.chunk.typeID = data[this.offset+3+3];
+                    this.chunk.type = AMF0MessageType[this.chunk.typeID];
+                    this.chunk.streamID = data.readUInt32BE(this.offset+3+3+1);
+                    this.offset += 11;
+                } else if (this.chunk.fmt === 1) {
+                    //- fmt == 1 - headers 7 bytes long
+                    //-- timestamp delta - 3 bytes
+                    //-- msg len - 3 bytes
+                    //-- msg type id - 1 byte
+                    this.offset += 7;
+                } else if (this.chunk.fmt === 2) {
+                    //- fmt == 2 - headers 3 bytes long
+                    //-- timestamp delta - 3 bytes
+                    this.offset += 3;
+                } else if (this.chunk.fmt === 3) {
+                    //- fmt == 3 - no message headerl chunks of this type should use values from the
+                    // preceding chunk of the same chunk stream ID
+                } else {
+                    console.error(`Invalid chunk format -> ${this.chunk.fmt}`);
+                    return; // TODO: better error case
+                }
+
+                this.stage = ParserStage.MsgHeader;
+            }
+
+            if (this.stage === ParserStage.MsgHeader) {
+                if (this.chunk.typeID === AMF0MessageType.WindowAckSize) {
+                    this.chunk.windowAckSize = data.readUInt32BE(this.offset);
+                    this.offset += 4;
+                    this.stage = ParserStage.Emit;
+                } else if (this.chunk.typeID === AMF0MessageType.SetPeerBandw) {
+                    this.chunk.windowAckSize = data.readUInt32BE(this.offset);
+                    this.chunk.limitType = data[this.offset+4];
+                    this.offset += 5;
+                    this.stage = ParserStage.Emit;
+                } else if (this.chunk.typeID === AMF0MessageType.SetChunkSize) {
+                    this.chunk.size = data.readUInt32BE(this.offset);
+                    this.offset += 4;
+                    this.stage = ParserStage.Emit;
+                } else if (this.chunk.typeID === AMF0MessageType.Command) {
+                    const commandName = readCommandName(data, this.offset);
+                    this.offset = commandName.offset;
+                    this.chunk.commandName = commandName.name;
+                    
+                    const transactionID = readTransactionID(data, this.offset);
+                    this.offset = transactionID.offset;
+                    this.chunk.transactionID = transactionID.id;
+
+                    // reading objects, separated by 0x0, 0x0, 0x9
+                    this.chunk.objects = [];
+                    while (data[this.offset] === AMF0Type.Object) {
+                        this.offset += 1;
+                        const properties = [];
+                        while(data.compare(Buffer.from(EOM), 0, 3, this.offset, this.offset + 3) !== 0) {
+                            const prop = propertyFromBytes(data, this.offset);
+                            this.offset = prop.offset;
+                            properties.push(prop.prop);
+                        }
+                        this.chunk.objects.push({ properties });
+                        this.offset += 3;
+                    }
+                    this.stage = ParserStage.Emit;
+                }
+            }
+
+            if (this.stage === ParserStage.Emit) {
+                // TODO: emit event with parsed chunk
+                this.stage = ParserStage.Start;
+            }
+
+            console.log(this.chunk);
+        }
+
+        if(this.stage === ParserStage.Start && data.length === this.offset) {
+            this.offset = 0;
+        }
+    }
+}
+
+
+function recv(client) {
+    let buf = Buffer.alloc(0);
+    const parser = new Parser(client);
+
+    return function(data) {
+        console.log(data);
+        buf = Buffer.concat([buf, data]);
+        parser.parse(data);
+    }
 }
 
 module.exports = RTMPClient;
