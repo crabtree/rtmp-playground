@@ -341,8 +341,7 @@ class AMF0Command {
         return [
             ...toCommandName(this.name),
             ...toTransactionID(this.transactionID),
-            ...this.objects.reduce(
-                (p, c) => { p.push(...c.toBytes()); return p; }, []),
+            ...reduceToBytes(this.objects),
         ];
     }
 }
@@ -360,8 +359,7 @@ class AMF0Object {
     toBytes() {
         return [
             this.type,
-            ...this.properties.reduce(
-                (p, c) => { p.push(...c.toBytes()); return p; }, []),
+            ...reduceToBytes(this.properties),
             ...EOM,
         ];
     }
@@ -414,6 +412,41 @@ function toBytes(bytes, data) {
         prevMax = max;
     }
     return b;
+}
+
+function reduceToBytes(collection) {
+    return collection.reduce(
+        (p, c) => { p.push(...c.toBytes()); return p; }, []);
+}
+
+function propertyFromBytes(bytes, offset) {
+    offset = offset || 0;
+    const len = bytes.readUInt16BE(offset);
+    const name = bytes.toString('utf8', offset+2, offset+2+len);
+    const type = AMF0Type[bytes[offset+2+len]];
+    offset += 2+len+1;
+
+    let value, obj;
+    switch(AMF0Type[type]) {
+        case AMF0Type.String:
+            const len = bytes.readUInt16BE(offset);
+            value = bytes.toString('utf8', offset+2, offset+2+len);
+            obj = new AMF0String(value);
+            offset += 2+len;
+            break;
+        case AMF0Type.Number:
+            value = bytes.readDoubleBE(offset);
+            obj = new AMF0Number(value);
+            offset += 8;
+            break;
+        case AMF0Type.Boolean:
+            value = bytes[offset] === 1;
+            obj = new AMF0Boolean(value);
+            offset += 1;
+            break;
+    }
+    const prop = AMF0Property(name, obj);
+    return { offset, name, type, value, prop };
 }
 
 module.exports = RTMPClient;
